@@ -99,8 +99,9 @@ lint.ignore = [
   # Allow non-abstract empty methods in abstract base classes
   "B027", "B904", "B006",
   "E501", "E741",
+  "F722",
   # Ignore complexity
-  "C901", "PLR0911", "PLR0912", "PLR0913", "PLR0915",
+  "C901", "PLR0911", "PLR0912", "PLR0913", "PLR0915", "PLC0415",
   "RUF001", "PLC1901", "N814", "UP035",
   "T201", "PLW0603", "PLW2901",
 ]
