@@ -191,6 +191,10 @@ def curate_tardis_traces(
     bin_size: Annotated[int, {"choices": get_available_binsize}],
     min_length: float = 10.0,
     trim_edge_by: float = 24.5,
+    dedup_max_lateral: Annotated[float, {"label": "duplicate max lateral (nm)"}] = 5.0,
+    dedup_min_overlap: Annotated[
+        float, {"label": "duplicate min overlap fraction", "min": 0.0, "max": 1.0}
+    ] = 0.8,
     fit_max_interval: float = 30.0,
     fit_err_max: float = 1.0,
     fit_edge_sigma: float = 2.0,
@@ -226,7 +230,7 @@ def curate_tardis_traces(
         tomo = ui.tomogram
         for each in coords:
             tomo.add_spline(each, config=config, err_max=err_max)
-            ui._add_spline_to_images(each, len(tomo.splines) - 1)
+            ui._add_spline_to_images(tomo.splines[-1], len(tomo.splines) - 1)
         ui.reset_choices()
         ui.SplineControl.num = len(tomo.splines) - 1
 
@@ -244,6 +248,17 @@ def curate_tardis_traces(
     cb = _register_paths.with_args(coords_to_register, fit_err_max)
     yield cb
     cb.await_call()
+
+    yield thread_worker.description("Filter duplicate traces")
+
+    filter_result = spline_filter.filter_duplicate_splines(
+        ui.tomogram,
+        max_lateral=dedup_max_lateral,
+        min_overlap_fraction=dedup_min_overlap,
+        report_hook=report_hook,
+    )
+    for i in sorted(filter_result.dropped, reverse=True):
+        ui.tomogram.splines.pop(i)
 
     yield from ui.fit_splines.arun(
         max_interval=fit_max_interval,
