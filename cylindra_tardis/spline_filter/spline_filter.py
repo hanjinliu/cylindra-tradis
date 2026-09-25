@@ -7,6 +7,7 @@ import polars as pl
 from cylindra.components import CylTomogram
 from numpy.typing import NDArray
 from scipy.spatial import cKDTree
+from scipy.spatial.distance import cdist
 
 from cylindra_tardis.spline_filter.connection import Join, Samples, evaluate_pair
 from cylindra_tardis.spline_filter.periodicity import measure_axial_periodicity
@@ -109,6 +110,79 @@ def filter_by_mean_curvature(
         else:
             dropped.append(i)
     return FilterResult(kept=kept, dropped=dropped)
+
+
+def filter_duplicate_splines(
+    tomo: CylTomogram,
+    indices: Sequence[int] | None = None,
+    *,
+    max_lateral: float = 5.0,
+    min_overlap_fraction: float = 0.8,
+    sample_interval: float = 5.0,
+    report_hook: ReportHook | None = None,
+) -> FilterResult:
+    """Drop splines that are near-duplicates of another, longer spline.
+
+    TARDIS sometimes emits two (or more) separate traces for the same
+    microtubule, offset laterally by only a few nanometers. Those bodies run
+    the same way rather than away from a shared junction, so
+    `connect_collinear_splines` correctly refuses to merge them -- and without
+    a separate check they both survive as nearly coincident splines. This
+    keeps the longest spline in each overlapping group and drops the rest.
+
+    Parameters
+    ----------
+    max_lateral : float, default 5.0
+        Maximum separation [nm] for a sampled point on one spline to count as
+        covered by the other. Keep this well below the typical spacing
+        between distinct microtubules so that genuinely adjacent filaments
+        are not mistaken for duplicates.
+    min_overlap_fraction : float, default 0.8
+        Minimum fraction of the shorter spline's arclength that must be
+        covered by a longer spline for the shorter one to be dropped.
+    """
+    idx = _norm_indices(tomo, indices)
+    if len(idx) < 2:
+        return FilterResult(kept=idx, dropped=[])
+
+    samples = [Samples.from_spline(tomo.splines[i], sample_interval, 0.0) for i in idx]
+    pairs = _candidate_pairs(samples, max_lateral)
+
+    # Longest pair first, so a chain of duplicates collapses onto the longest
+    # spline instead of onto whichever pair happens to be evaluated first.
+    order = sorted(
+        pairs, key=lambda p: -max(samples[p[0]].length, samples[p[1]].length)
+    )
+
+    rows: list[dict[str, object]] = []
+    dropped: set[int] = set()
+    for ia, ib in order:
+        dist = cdist(samples[ia].points, samples[ib].points)
+        frac_a = float(np.mean(dist.min(axis=1) <= max_lateral))
+        frac_b = float(np.mean(dist.min(axis=0) <= max_lateral))
+        if samples[ia].length <= samples[ib].length:
+            shorter, longer, frac = ia, ib, frac_a
+        else:
+            shorter, longer, frac = ib, ia, frac_b
+        is_dup = frac >= min_overlap_fraction
+        rows.append(
+            {
+                "spline_a": idx[ia],
+                "spline_b": idx[ib],
+                "shorter": idx[shorter],
+                "longer": idx[longer],
+                "overlap_fraction": frac,
+                "duplicate": is_dup,
+            }
+        )
+        if is_dup:
+            dropped.add(idx[shorter])
+
+    report = pl.DataFrame(rows)
+    _report("filter_duplicate_splines", report, report_hook)
+
+    kept = [i for i in idx if i not in dropped]
+    return FilterResult(kept=kept, dropped=sorted(dropped))
 
 
 def filter_by_cft(
