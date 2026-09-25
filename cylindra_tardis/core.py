@@ -2,7 +2,6 @@ from typing import Annotated, Any, Literal
 
 import impy as ip
 import numpy as np
-import polars as pl
 from cylindra.plugin import register_function
 from cylindra.types import get_available_binsize
 from cylindra.widgets import CylindraMainWidget
@@ -10,9 +9,9 @@ from cylindra.widgets.batch._sequence import PathInfo
 from magicclass.types import Optional, Path
 from magicclass.utils import thread_worker
 
-from cylindra_tardis import spline_filter
 from cylindra_tardis.io import iter_tardis_coords
 from cylindra_tardis.segmentation import TardisSegmentationModel
+from cylindra_tardis.workflow import search_prediction_dir
 
 
 @register_function(name="Open TARDIS output CSV")
@@ -23,7 +22,7 @@ def open_tardis_output_csv(
     min_length: Annotated[float, {"label": "Minimum length (nm)"}] = 10,
 ):
     if path is None:
-        root = _search_prediction_dir(ui.tomogram.source)
+        root = search_prediction_dir(ui.tomogram.source)
         paths = list(root.glob("*_instances.csv"))
         if not paths:
             raise ValueError(f"No TARDIS output CSV files found in {root}.")
@@ -46,7 +45,7 @@ def open_tardis_segmentation(
     tomo = ui.tomogram
     if tomo is None:
         raise ValueError("No tomogram is currently loaded.")
-    prediction_dir = _search_prediction_dir(tomo.source)
+    prediction_dir = search_prediction_dir(tomo.source)
     basename = tomo.source.stem
     # TODO: other image output types
     path_semantic = prediction_dir / f"{basename}_semantic.mrc"
@@ -178,160 +177,3 @@ def segment_microtubules_batch(
         img_binned = img.binning(bin_size, check_edges=False).compute()
         model.run(img_binned, path_set.image, debug=debug)
         yield
-
-
-@register_function
-@thread_worker.with_progress("Curating TARDIS traces")
-def curate_tardis_traces(
-    ui: CylindraMainWidget,
-    path_coords: Annotated[
-        Optional[Path.Read["*.csv"]],
-        {"label": "TARDIS coordinates", "text": "Search by tomogram path"},
-    ],
-    bin_size: Annotated[int, {"choices": get_available_binsize}],
-    min_length: float = 10.0,
-    trim_edge_by: float = 24.5,
-    dedup_max_lateral: Annotated[float, {"label": "duplicate max lateral (nm)"}] = 5.0,
-    dedup_min_overlap: Annotated[
-        float, {"label": "duplicate min overlap fraction", "min": 0.0, "max": 1.0}
-    ] = 0.8,
-    fit_max_interval: float = 30.0,
-    fit_err_max: float = 1.0,
-    fit_edge_sigma: float = 2.0,
-    max_curvature: Annotated[
-        float, {"step": 0.00001, "min": 0.00001, "label": "max curvature (nm^-1)"}
-    ] = 0.05,
-    min_snr: Annotated[float, {"step": 0.1, "min": 0.1, "label": "min S/N"}] = 6.0,
-    radius: Annotated[
-        Optional[float], {"label": "radius (nm)", "text": "Measure one by one"}
-    ] = 11.0,
-    max_gap: Annotated[float, {"label": "max gap (nm)"}] = 40.0,
-    max_lateral: Annotated[float, {"label": "max lateral (nm)"}] = 12.5,
-    max_angle: Annotated[float, {"label": "max angle (deg)"}] = 15.0,
-):
-    if path_coords is None:
-        path_coords = (
-            _search_prediction_dir(ui.tomogram.source)
-            / f"{ui.tomogram.source.stem}_instances.csv"
-        )
-    config = ui.default_config
-
-    def report_hook(title, report):
-        return _report_hook(ui, title, report)
-
-    @thread_worker.callback
-    def _init():
-        if ui.splines.count() > 0:
-            ui.splines.clear()
-            ui.reset_choices()
-
-    @thread_worker.callback
-    def _register_paths(coords, err_max):
-        tomo = ui.tomogram
-        for each in coords:
-            tomo.add_spline(each, config=config, err_max=err_max)
-            ui._add_spline_to_images(tomo.splines[-1], len(tomo.splines) - 1)
-        ui.reset_choices()
-        ui.SplineControl.num = len(tomo.splines) - 1
-
-    yield _init.with_desc("Registering TARDIS traces as splines")
-
-    coords_to_register = []
-    for coords in iter_tardis_coords(
-        path_coords,
-        tomo_size=np.array(ui.tomogram.image.shape) * ui.tomogram.scale,
-        trim_edge_by=trim_edge_by,
-        min_length=min_length,
-    ):
-        coords_to_register.append(coords)
-
-    cb = _register_paths.with_args(coords_to_register, fit_err_max)
-    yield cb
-    cb.await_call()
-
-    yield thread_worker.description("Filter duplicate traces")
-
-    filter_result = spline_filter.filter_duplicate_splines(
-        ui.tomogram,
-        max_lateral=dedup_max_lateral,
-        min_overlap_fraction=dedup_min_overlap,
-        report_hook=report_hook,
-    )
-    for i in sorted(filter_result.dropped, reverse=True):
-        ui.tomogram.splines.pop(i)
-
-    yield from ui.fit_splines.arun(
-        max_interval=fit_max_interval,
-        bin_size=bin_size,
-        err_max=fit_err_max,
-        degree_precision=0.5,
-        edge_sigma=fit_edge_sigma,
-        max_shift=5.0,
-    )
-
-    yield thread_worker.description("Filter by curvature")
-
-    filter_result = spline_filter.filter_by_mean_curvature(
-        ui.tomogram, max_curvature=max_curvature
-    )
-    for i in sorted(filter_result.dropped, reverse=True):
-        ui.tomogram.splines.pop(i)
-
-    yield _on_spline_updated.with_args(ui)
-
-    if radius is None:
-        yield from ui.measure_radius.arun(
-            bin_size=bin_size, min_radius=7.0, max_radius=18.0
-        )
-    else:
-        for i in range(ui.tomogram.splines.count()):
-            ui.tomogram.splines[i].radius = radius
-
-    yield thread_worker.description("Filter by CFT peaks")
-
-    filter_result = spline_filter.filter_by_cft(
-        ui.tomogram,
-        min_snr=min_snr,
-        bin_size=bin_size,
-        report_hook=report_hook,
-    )
-    for i in sorted(filter_result.dropped, reverse=True):
-        ui.tomogram.splines.pop(i)
-    yield _on_spline_updated.with_args(ui).with_desc("Connect collinear splines")
-
-    join_result = spline_filter.connect_collinear_splines(
-        ui.tomogram,
-        max_distance=max_gap,
-        max_lateral=max_lateral,
-        max_angle=max_angle,
-        # report_hook=report_hook,
-    )
-
-    for i in sorted(join_result.consumed, reverse=True):
-        ui.tomogram.splines.pop(i)
-    cb = _register_paths.with_args(join_result.merged, fit_err_max)
-    yield cb
-    cb.await_call()
-    yield _on_spline_updated.with_args(ui)
-
-
-def _report_hook(ui: CylindraMainWidget, title: str, report: pl.DataFrame) -> None:
-    ui.logger.print(f"{title} report:")
-    ui.logger.print_table(report, index=False, precision=4)
-
-
-def _search_prediction_dir(tomogram_source: Path) -> Path:
-    candidates = ["TARDIS", "Predictions"]
-    for candidate in candidates:
-        prediction_dir = tomogram_source.parent / candidate
-        if prediction_dir.exists():
-            break
-    else:
-        raise ValueError("No TARDIS prediction directory found.")
-    return prediction_dir
-
-
-@thread_worker.callback
-def _on_spline_updated(ui: CylindraMainWidget):
-    ui._update_splines_in_images()
-    ui.reset_choices()

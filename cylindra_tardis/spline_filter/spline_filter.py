@@ -351,7 +351,8 @@ def connect_collinear_splines(
     """
     idx = _norm_indices(tomo, indices)
     if len(idx) < 2:
-        return _report("connect_collinear_splines", pl.DataFrame(), report_hook)
+        _report("connect_collinear_splines", pl.DataFrame(), report_hook)
+        return JoinResult(consumed=[], merged=[])
 
     extension = max_distance / 2
     samples = [
