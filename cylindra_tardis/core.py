@@ -72,7 +72,38 @@ def segment_microtubules(
     device: str = "0",
     debug: bool = False,
 ):
-    """Segment microtubules in the current tomogram"""
+    """Segment microtubules in the current tomogram.
+
+    Parameters
+    ----------
+    bin_size : int
+        The bin size to use for the input tomogram image.
+    prefilter_cutoff_nm : float, optional
+        Binned tomogram will be prefiltered with this cutoff (in nm).
+    patch_size : int, optional
+        Argument of `tardis_mt`. Window size used for prediction. This will break
+        tomograms into smaller patches with 25% overlap. Smaller values consume less
+        GPU, but also may lead to worse segmentation results.
+    points_in_patch : int, optional
+        Argument of `tardis_mt`. Maximum number of points that could be found in each
+        point cloud cropped view. A higher number will always lead to faster
+        inference, and may slightly improve segmentation.
+    filter_by_length : int, optional
+        Argument of `tardis_mt`. Minimum microtubule length.
+    cnn_threshold : float, optional
+        Argument of `tardis_mt`. Threshold used for semantic prediction. Higher value
+        will lead to a reduction in noise and microtubule prediction recall. A lower
+        value will increase microtubules prediction recall but may lead to increased
+        noise.
+    dist_threshold : float, optional
+        Argument of `tardis_mt`. Threshold used for instance prediction. Higher value
+        will lower number of the predicted instances.
+    device : str, optional
+        Argument of `tardis_mt`. "cpu" for running on the CPU, "gpu" for the GPU. int
+        for specifying a particular GPU by its index.
+    debug : bool, optional
+        Argument of `tardis_mt`. Enable debugging mode.
+    """
     tomo = ui.tomogram
     if tomo is None:
         raise ValueError("No tomogram is currently loaded.")
@@ -109,6 +140,7 @@ def _get_loader_paths(*_):
 
 
 @register_function(name="Segment microtubules (batch)")
+@thread_worker.with_progress("Segmenting microtubules (batch)", total="len(path_sets)")
 def segment_microtubules_batch(
     ui: CylindraMainWidget,
     path_sets: Annotated[Any, {"bind": _get_loader_paths}],
@@ -145,13 +177,14 @@ def segment_microtubules_batch(
             img = -img  # revert to the light-background image
         img_binned = img.binning(bin_size, check_edges=False).compute()
         model.run(img_binned, path_set.image, debug=debug)
+        yield
 
 
 @register_function
 @thread_worker.with_progress("Curating TARDIS traces")
 def curate_tardis_traces(
     ui: CylindraMainWidget,
-    unfiltered_coords: Annotated[
+    path_coords: Annotated[
         Optional[Path.Read["*.csv"]],
         {"label": "TARDIS coordinates", "text": "Search by tomogram path"},
     ],
@@ -172,8 +205,8 @@ def curate_tardis_traces(
     max_lateral: Annotated[float, {"label": "max lateral (nm)"}] = 12.5,
     max_angle: Annotated[float, {"label": "max angle (deg)"}] = 15.0,
 ):
-    if unfiltered_coords is None:
-        unfiltered_coords = (
+    if path_coords is None:
+        path_coords = (
             _search_prediction_dir(ui.tomogram.source)
             / f"{ui.tomogram.source.stem}_instances.csv"
         )
@@ -190,14 +223,18 @@ def curate_tardis_traces(
 
     @thread_worker.callback
     def _register_paths(coords, err_max):
+        tomo = ui.tomogram
         for each in coords:
-            ui.register_path(each, err_max=err_max, config=config)
+            tomo.add_spline(each, config=config, err_max=err_max)
+            ui._add_spline_to_images(each, len(tomo.splines) - 1)
+        ui.reset_choices()
+        ui.SplineControl.num = len(tomo.splines) - 1
 
     yield _init.with_desc("Registering TARDIS traces as splines")
 
     coords_to_register = []
     for coords in iter_tardis_coords(
-        unfiltered_coords,
+        path_coords,
         tomo_size=np.array(ui.tomogram.image.shape) * ui.tomogram.scale,
         trim_edge_by=trim_edge_by,
         min_length=min_length,
@@ -252,7 +289,7 @@ def curate_tardis_traces(
         max_distance=max_gap,
         max_lateral=max_lateral,
         max_angle=max_angle,
-        report_hook=report_hook,
+        # report_hook=report_hook,
     )
 
     for i in sorted(join_result.consumed, reverse=True):

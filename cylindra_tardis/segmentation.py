@@ -35,6 +35,10 @@ class TardisSegmentationModel:
         else:
             cutoff = 1.0 / sigma
         img_filt = _tiled.lowpass_filter(cutoff=cutoff)
+        if (img_path := tardis_dir / "input.mrc").exists():
+            # If the previous run crashed and left an incomplete input file, it cannot be
+            # overwritten by mrcfile, so explicitly remove it first.
+            img_path.unlink()
         img_filt.imsave(tardis_dir / "input.mrc")
 
         basename = image_path.stem

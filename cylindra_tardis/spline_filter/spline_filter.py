@@ -231,18 +231,18 @@ def connect_collinear_splines(
     interval: float = 5.0,
     report_hook: ReportHook | None = None,
 ) -> JoinResult:
-    """Join splines of ``tomo`` that lie on a common axis.
+    """Join splines of `tomo` that lie on a common axis.
 
     Consumed splines are deleted and each chain is re-registered as one spline,
-    so ``tomo.splines`` is rebuilt. The merged splines carry no properties; run
-    ``CylTomogram.fit`` and the analyses again on them afterwards.
+    so `tomo.splines` is rebuilt. The merged splines carry no properties; run
+    `CylTomogram.fit` and the analyses again on them afterwards.
 
     Purely geometric and direction-free: parallel and antiparallel pairs are not
     distinguished, since segmentation output carries no polarity and the
     parameter direction of a spline is arbitrary. Endpoints are not compared
     directly either, because two TARDIS traces of the same microtubule
     frequently overlap by ~100 nm. Instead every spline is linearly extended by
-    ``max_distance / 2`` on both ends; the minimum of the distance matrix
+    `max_distance / 2` on both ends; the minimum of the distance matrix
     between two extended curves is the lateral separation, the closest pair of
     original endpoints is the junction, and the two bodies must run away from
     that junction in opposite directions.
