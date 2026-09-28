@@ -15,6 +15,7 @@ from magicclass import (
     vfield,
 )
 from magicclass.types import Optional, Path
+from magicclass.utils import thread_worker
 
 from cylindra_tardis import curation
 from cylindra_tardis.workflow import CurationParams
@@ -216,9 +217,9 @@ class _CurationWidgetBase(MagicTemplate):
             fit_edge_sigma=self.Fitting.edge_sigma,
             filter_by_curvature=self.Curvature.apply,
             max_curvature=self.Curvature.max_curvature,
-            radius=None if self.CFT.measure_radius else self.CFT.radius,
-            filter_by_cft=self.CFT.apply,
-            min_snr=self.CFT.min_snr,
+            radius=None if self.cft.measure_radius else self.cft.radius,
+            filter_by_cft=self.cft.apply,
+            min_snr=self.cft.min_snr,
             max_gap=self.Connection.max_gap,
             max_lateral=self.Connection.max_lateral,
             max_angle=self.Connection.max_angle,
@@ -246,10 +247,11 @@ class TardisCurationWidget(_CurationWidgetBase):
     Duplicates = field(Duplicates, name="Duplicates")
     Fitting = field(Fitting, name="Fitting")
     Curvature = field(Curvature, name="Curvature")
-    CFT = field(CFT, name="CFT")
+    cft = field(CFT, name="CFT")
     Connection = field(Connection, name="Connection")
 
     @set_design(text="Run")
+    @thread_worker
     def run(self):
         """Run the curation workflow on the current tomogram.
 
@@ -258,8 +260,7 @@ class TardisCurationWidget(_CurationWidgetBase):
         ui = self._get_main()
         p = self._get_params(self.bin_size)
         path_coords = self.path_coords
-        self.close()
-        curation.register_tardis_traces(
+        yield from curation.register_tardis_traces.arun(
             ui,
             path_coords=path_coords,
             min_length=p.min_length,
@@ -267,10 +268,10 @@ class TardisCurationWidget(_CurationWidgetBase):
             err_max=p.fit_err_max,
         )
         if p.filter_duplicates:
-            curation.filter_duplicate_splines(
+            yield from curation.filter_duplicate_splines.arun(
                 ui, max_lateral=p.dedup_max_lateral, min_overlap=p.dedup_min_overlap
             )
-        ui.fit_splines(
+        yield from ui.fit_splines.arun(
             max_interval=p.fit_max_interval,
             bin_size=p.bin_size,
             err_max=p.fit_err_max,
@@ -279,20 +280,30 @@ class TardisCurationWidget(_CurationWidgetBase):
             max_shift=5.0,
         )
         if p.filter_by_curvature:
-            curation.filter_splines_by_curvature(ui, max_curvature=p.max_curvature)
+            yield from curation.filter_splines_by_curvature.arun(
+                ui, max_curvature=p.max_curvature
+            )
         if p.filter_by_cft:
             if p.radius is None:
-                ui.measure_radius(bin_size=p.bin_size, min_radius=7.0, max_radius=18.0)
+                yield from ui.measure_radius.arun(
+                    bin_size=p.bin_size, min_radius=7.0, max_radius=18.0
+                )
             else:
                 ui.set_radius(radius=p.radius)
-            curation.filter_splines_by_cft(ui, bin_size=p.bin_size, min_snr=p.min_snr)
-        curation.connect_collinear_splines(
+            yield from curation.filter_splines_by_cft.arun(
+                ui, bin_size=p.bin_size, min_snr=p.min_snr
+            )
+        yield from curation.connect_collinear_splines.arun(
             ui,
             max_gap=p.max_gap,
             max_lateral=p.max_lateral,
             max_angle=p.max_angle,
             err_max=p.fit_err_max,
         )
+
+    @run.started.connect
+    def _on_run_started(self):
+        self.close()
 
 
 @magicclass(name="Curate TARDIS traces (batch)", record=False)
@@ -313,10 +324,11 @@ class TardisBatchCurationWidget(_CurationWidgetBase):
     Duplicates = field(Duplicates, name="Duplicates")
     Fitting = field(Fitting, name="Fitting")
     Curvature = field(Curvature, name="Curvature")
-    CFT = field(CFT, name="CFT")
+    cft = field(CFT, name="CFT")
     Connection = field(Connection, name="Connection")
 
     @set_design(text="Run")
+    @thread_worker
     def run(self):
         """Run the curation workflow on the projects checked in the batch analyzer.
 
@@ -328,5 +340,10 @@ class TardisBatchCurationWidget(_CurationWidgetBase):
         if len(path_sets) == 0:
             raise ValueError("No project is checked in the batch analyzer.")
         params = self._get_params(self.bin_size)
+        yield from curation.curate_tardis_traces_batch.arun(
+            ui, path_sets, **params.asdict()
+        )
+
+    @run.started.connect
+    def _on_run_started(self):
         self.close()
-        curation.curate_tardis_traces_batch(ui, path_sets, **params.asdict())

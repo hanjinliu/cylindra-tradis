@@ -1,40 +1,14 @@
 from typing import Annotated, Any, Literal
 
 import impy as ip
-import numpy as np
 from cylindra.plugin import register_function
 from cylindra.types import get_available_binsize
 from cylindra.widgets import CylindraMainWidget
 from cylindra.widgets.batch._sequence import PathInfo
-from magicclass.types import Optional, Path
 from magicclass.utils import thread_worker
 
-from cylindra_tardis.io import iter_tardis_coords
 from cylindra_tardis.segmentation import TardisSegmentationModel
 from cylindra_tardis.workflow import search_prediction_dir
-
-
-@register_function(name="Open TARDIS output CSV")
-def open_tardis_output_csv(
-    ui: CylindraMainWidget,
-    path: Optional[Path.Read["*.csv"]],
-    trim_edge_by: Annotated[float, {"label": "Trim edge by (nm)"}] = 24.5,
-    min_length: Annotated[float, {"label": "Minimum length (nm)"}] = 10,
-):
-    if path is None:
-        root = search_prediction_dir(ui.tomogram.source)
-        paths = list(root.glob("*_instances.csv"))
-        if not paths:
-            raise ValueError(f"No TARDIS output CSV files found in {root}.")
-        path = paths[0]
-    ui.logger.print(f"Reading TARDIS coordinates: {path}")
-    for coords in iter_tardis_coords(
-        path,
-        tomo_size=np.array(ui.tomogram.image.shape) * ui.tomogram.scale,
-        trim_edge_by=trim_edge_by,
-        min_length=min_length,
-    ):
-        ui.register_path(coords)
 
 
 @register_function(name="Open TARDIS segmentation")
@@ -49,8 +23,6 @@ def open_tardis_segmentation(
     basename = tomo.source.stem
     # TODO: other image output types
     path_semantic = prediction_dir / f"{basename}_semantic.mrc"
-    path_coords = prediction_dir / f"{basename}_instances_filter.csv"
-    open_tardis_output_csv(ui, path_coords)
     ui.open_label_image(path_semantic)
 
 

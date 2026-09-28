@@ -266,6 +266,14 @@ def curate_tardis_traces_batch(
             )
         yield
 
+    @thread_worker.callback
+    def _update_splines_in_widget():
+        for proj in ui.batch.constructor.projects:
+            if ui._project_dir and Path(proj.path).samefile(ui._project_dir):
+                proj._update_from_project()
+
+    return _update_splines_in_widget
+
 
 def _load_tomogram_for_batch(
     path_set: PathInfo, prj: CylindraProject, bin_size: int
